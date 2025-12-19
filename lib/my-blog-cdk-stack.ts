@@ -69,7 +69,7 @@ export class MyBlogCdkStack extends cdk.Stack {
     const albSG = ec2.SecurityGroup.fromSecurityGroupId(
       this,
       "ImportedAlbSG",
-      "sg-0d932e308b4445774" // my-blog-alb-sg
+      "sg-0d42c5ce2575e9c51" // my-blog-alb-sg
     );
 
     //  my-blog-frontend-sgをインポート
@@ -86,7 +86,7 @@ export class MyBlogCdkStack extends cdk.Stack {
       "Allow ALB to reach Frontend tasks on port 3000"
     );
 
-    // Backend 用 SG
+    // Backend 用 SGをインポート
     const backendSG = ec2.SecurityGroup.fromSecurityGroupId(
       this,
       "ImportedBackendSG",
@@ -97,6 +97,13 @@ export class MyBlogCdkStack extends cdk.Stack {
       frontendSG,
       ec2.Port.tcp(8080),
       "Allow Frontend containers to reach Backend containers on port 8080"
+    );
+
+    // my-blog-db-sgをインポート
+    const proxySG = ec2.SecurityGroup.fromSecurityGroupId(
+      this,
+      "ImportedProxySG",
+      "sg-0fc560f4882c31b32"
     );
 
     // my-blog-db-sgをインポート
@@ -187,6 +194,20 @@ export class MyBlogCdkStack extends cdk.Stack {
       removalPolicy: cdk.RemovalPolicy.DESTROY,
     });
 
+    //既存のrds proxyをインポート
+    const rdsProxy = rds.DatabaseProxy.fromDatabaseProxyAttributes(
+      this,
+      "ImportedProxy",
+      {
+        dbProxyName: "my-blog-db-proxy",
+        dbProxyArn:
+          "arn:aws:rds:ap-northeast-1:047719644594:db-proxy:prx-02d35a8c63cfd6848",
+        endpoint:
+          "my-blog-db-proxy.proxy-cd20mmqc4v1w.ap-northeast-1.rds.amazonaws.com",
+        securityGroups: [proxySG],
+      }
+    );
+
     // RDS インスタンスをスナップショットから復元
     const dbInstance = new rds.DatabaseInstanceFromSnapshot(
       this,
@@ -203,7 +224,7 @@ export class MyBlogCdkStack extends cdk.Stack {
         ),
         multiAz: false,
         allocatedStorage: 20,
-        publiclyAccessible: true, //あとでfalseにする
+        publiclyAccessible: false,
         vpcSubnets: {
           subnets: [privateSubnetA],
         },
@@ -214,7 +235,7 @@ export class MyBlogCdkStack extends cdk.Stack {
     );
     dbInstance.applyRemovalPolicy(cdk.RemovalPolicy.DESTROY);
 
-    //既存のパラメータ(DBホスト) ＊Lamdaで毎回値を書き換えられる
+    //既存のパラメータ(DBホスト)
     const dbHostParam = ssm.StringParameter.fromSecureStringParameterAttributes(
       this,
       "ImportedDbHostParam",
@@ -251,50 +272,89 @@ export class MyBlogCdkStack extends cdk.Stack {
       }
     );
     // 既存のパラメータ(DBのsecret-key-base)
-    const dbSecretKeyBaseParam = ssm.StringParameter.fromSecureStringParameterAttributes(
-      this,
-      "ImportedDbSecretKeyBaseParam",
-      {
-        parameterName: "/my-blog/db/secret-key-base",
-      }
-    );
+    const dbSecretKeyBaseParam =
+      ssm.StringParameter.fromSecureStringParameterAttributes(
+        this,
+        "ImportedDbSecretKeyBaseParam",
+        {
+          parameterName: "/my-blog/db/secret-key-base",
+        }
+      );
 
-    //Lambda(パラメーターのmyblog/db/hostの値を書き換える処理)をインポート
-    const existingFn = lambda.Function.fromFunctionArn(
-      this,
-      "ImportedLambdaFunction",
-      "arn:aws:lambda:ap-northeast-1:047719644594:function:updatedParameter"
-    );
-
-    //Lambdaを実行
-    const crRole = iam.Role.fromRoleArn(
-      this,
-      "ImportedInvokeRole",
-      "arn:aws:iam::047719644594:role/excuteLumbdaRole"
-    );
-
-    const dbHost = dbInstance.dbInstanceEndpointAddress;
-
-    const invoke = new AwsCustomResource(this, "InvokeLambdaToUpdateSSM", {
+    // DB を Proxy に関連付けるカスタムリソースLambda関数
+    const registerDbToProxy = new AwsCustomResource(this, "RegisterDbToProxy", {
       onCreate: {
-        service: "Lambda",
-        action: "invoke",
+        service: "RDS",
+        action: "registerDBProxyTargets",
         parameters: {
-          FunctionName: existingFn.functionName,
-          Payload: cdk.Stack.of(this).toJsonString({
-            hostname: dbHost,
-          }),
+          DBProxyName: "my-blog-db-proxy",
+          DBInstanceIdentifiers: [dbInstance.instanceIdentifier],
         },
-        physicalResourceId: PhysicalResourceId.of("UpdateDbHostCustomResource"),
+        physicalResourceId: PhysicalResourceId.of("RegisterDbProxyTarget"),
       },
       policy: AwsCustomResourcePolicy.fromSdkCalls({
         resources: AwsCustomResourcePolicy.ANY_RESOURCE,
       }),
-      role: crRole,
+    });
+    // proxy の登録処理が DB インスタンスの作成完了後に動く
+    registerDbToProxy.node.addDependency(dbInstance);
+
+    //既存のLamdbdaのロール(secrets managerに対するアクセス)
+    const UpdatedSecretsMnagerLambdaRole = iam.Role.fromRoleArn(
+      this,
+      "ExistingLambdaRole",
+      "arn:aws:iam::047719644594:role/UpdatedSecretsMnagerLambdaRole",
+      {
+        mutable: false,
+      }
+    );
+
+    // Secrets Manager のホスト値を更新するlambda関数
+    const updateSecretLambda = new lambda.Function(this, "UpdateSecretLambda", {
+      runtime: lambda.Runtime.NODEJS_18_X,
+      handler: "index.handler",
+      code: lambda.Code.fromAsset("lambda/update-secret"),
+      role: UpdatedSecretsMnagerLambdaRole,
+      environment: {
+        SECRET_ID:
+          "arn:aws:secretsmanager:ap-northeast-1:047719644594:secret:prod/myBlog/Postgres-MDa1Qr",
+        DB_ENDPOINT: dbInstance.dbInstanceEndpointAddress,
+      },
     });
 
-    // DBインスタンスの構築が終わるまで待つように指定
-    invoke.node.addDependency(dbInstance);
+    const updateSecretCustomResource = new AwsCustomResource(
+      this,
+      "UpdateSecretCustomResource",
+      {
+        onCreate: {
+          service: "Lambda",
+          action: "invoke",
+          parameters: {
+            FunctionName: updateSecretLambda.functionName,
+            InvocationType: "Event",
+            Payload: JSON.stringify({
+              DB_ENDPOINT: dbInstance.dbInstanceEndpointAddress,
+              SECRET_ID:
+                "arn:aws:secretsmanager:ap-northeast-1:047719644594:secret:prod/myBlog/Postgres-MDa1Qr",
+            }),
+          },
+          physicalResourceId: PhysicalResourceId.of(
+            "UpdateSecretLambdaInvocation"
+          ),
+        },
+
+        policy: AwsCustomResourcePolicy.fromStatements([
+          new iam.PolicyStatement({
+            actions: ["lambda:InvokeFunction"], 
+            resources: [updateSecretLambda.functionArn],
+            effect: iam.Effect.ALLOW,
+          }),
+        ]),
+      }
+    );
+
+    // RDS作成完了後にCustom Resourceが呼ばれるよう依存関係を設定
+    updateSecretCustomResource.node.addDependency(dbInstance);
 
     //既存のACMの証明書をインポート
     const certArn =
@@ -311,7 +371,9 @@ export class MyBlogCdkStack extends cdk.Stack {
       internetFacing: true,
       vpcSubnets: { subnets: [publicSubnetA, publicSubnetC] },
       loadBalancerName: `${PREFIX}-alb`,
+      securityGroup: albSG,
     });
+
     //albのリスナー
     const listener = alb.addListener("HttpListener", {
       port: 443,
@@ -329,10 +391,12 @@ export class MyBlogCdkStack extends cdk.Stack {
       conditions: [elbv2.ListenerCondition.pathPatterns(["/*"])],
       action: elbv2.ListenerAction.forward([frontendTG]),
     });
+
     // 4. Route53のホストゾーンから取得し、エイリアスAレコード作成
     const hostedZone = route53.HostedZone.fromLookup(this, "BlogHostedZone", {
       domainName: "syuri-takeda.jp",
     });
+
     new route53.ARecord(this, "BlogAliasRecord", {
       zone: hostedZone,
       recordName: "blog", // => blog.syuri-takeda.jp
@@ -395,6 +459,7 @@ export class MyBlogCdkStack extends cdk.Stack {
         executionRole,
       }
     );
+
     const backendContainer = backendTaskDef.addContainer("BackendContainer", {
       image: ecs.ContainerImage.fromEcrRepository(backendRepo, "latest"),
       logging: ecs.LogDrivers.awsLogs({
@@ -402,11 +467,11 @@ export class MyBlogCdkStack extends cdk.Stack {
         logGroup: backendLogGroup,
       }),
       secrets: {
+        DB_HOST: ecs.Secret.fromSsmParameter(dbHostParam),
         DB_NAME: ecs.Secret.fromSsmParameter(dbNameParam),
         DB_USER: ecs.Secret.fromSsmParameter(dbUserParam),
         DB_PASSWORD: ecs.Secret.fromSsmParameter(dbPasswordParam),
-        DB_HOST: ecs.Secret.fromSsmParameter(dbHostParam),
-        SECRET_KEY_BASE: ecs.Secret.fromSsmParameter(dbSecretKeyBaseParam)
+        SECRET_KEY_BASE: ecs.Secret.fromSsmParameter(dbSecretKeyBaseParam),
       },
     });
 
@@ -437,8 +502,8 @@ export class MyBlogCdkStack extends cdk.Stack {
       },
     });
 
-    //Lambda(パラメーターのmyblog/db/hostの値を書き換える処理)の実行が完了されてから構築されるよう依存関係を指定
-    backendService.node.addDependency(invoke);
+    //Lambda(secrets manager hostの値を書き換える処理)の実行が完了されてから構築されるよう依存関係を指定
+    backendService.node.addDependency(updateSecretCustomResource);
 
     //フロントエンドのロググループ作成
     const frontendLogGroup = new logs.LogGroup(this, "FrontendLogGroup", {
