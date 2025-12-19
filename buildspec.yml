@@ -20,3 +20,6 @@ phases:
           echo "Deploying CDK stack..."
           cdk deploy --require-approval never
         fi
+cache:
+  paths:
+    - 'node_modules/**/*'
