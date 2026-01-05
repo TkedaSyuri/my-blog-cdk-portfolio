@@ -222,11 +222,11 @@ export class MyBlogCdkStack extends cdk.Stack {
           ec2.InstanceClass.BURSTABLE3,
           ec2.InstanceSize.MICRO
         ),
-        multiAz: false,
+        multiAz: true,
         allocatedStorage: 20,
         publiclyAccessible: false,
         vpcSubnets: {
-          subnets: [privateSubnetA],
+          subnets: [privateSubnetA,privateSubnetC],
         },
         subnetGroup,
         deleteAutomatedBackups: true,
@@ -489,7 +489,7 @@ export class MyBlogCdkStack extends cdk.Stack {
       taskDefinition: backendTaskDef,
       desiredCount: 1,
       assignPublicIp: false,
-      vpcSubnets: { subnets: [privateSubnetA] },
+      vpcSubnets: { subnets: [privateSubnetA,privateSubnetC] },
       securityGroups: [backendSG],
       serviceConnectConfiguration: {
         namespace: "my-blog-cluster",
@@ -501,6 +501,10 @@ export class MyBlogCdkStack extends cdk.Stack {
         ],
       },
     });
+
+    //backendのスケーリング設定
+    const backendScaling = backendService.autoScaleTaskCount({ minCapacity: 2, maxCapacity: 10 });
+    backendScaling.scaleOnCpuUtilization("BackendCpuScaling", { targetUtilizationPercent: 50 });
 
     //Lambda(secrets manager hostの値を書き換える処理)の実行が完了されてから構築されるよう依存関係を指定
     backendService.node.addDependency(updateSecretCustomResource);
@@ -552,12 +556,17 @@ export class MyBlogCdkStack extends cdk.Stack {
       taskDefinition: frontendTaskDef,
       desiredCount: 1,
       assignPublicIp: false,
-      vpcSubnets: { subnets: [privateSubnetA] },
+      vpcSubnets: { subnets: [privateSubnetA,privateSubnetC] },
       securityGroups: [frontendSG],
       serviceConnectConfiguration: {
         namespace: "my-blog-cluster",
       },
     });
+
+    //frontendのスケーリング設定
+    const frontendScaling = frontendService.autoScaleTaskCount({ minCapacity: 2, maxCapacity: 10 });
+    frontendScaling.scaleOnCpuUtilization("FrontendCpuScaling", { targetUtilizationPercent: 50 });
+
     //バックエンドが作成されてから起動するよう依存関係を指定
     frontendService.node.addDependency(backendService);
 
