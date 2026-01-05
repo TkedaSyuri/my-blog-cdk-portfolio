@@ -503,7 +503,7 @@ export class MyBlogCdkStack extends cdk.Stack {
     });
 
     //backendのスケーリング設定
-    const backendScaling = backendService.autoScaleTaskCount({ minCapacity: 2, maxCapacity: 10 });
+    const backendScaling = backendService.autoScaleTaskCount({ minCapacity: 1, maxCapacity: 2 });
     backendScaling.scaleOnCpuUtilization("BackendCpuScaling", { targetUtilizationPercent: 50 });
 
     //Lambda(secrets manager hostの値を書き換える処理)の実行が完了されてから構築されるよう依存関係を指定
@@ -564,7 +564,7 @@ export class MyBlogCdkStack extends cdk.Stack {
     });
 
     //frontendのスケーリング設定
-    const frontendScaling = frontendService.autoScaleTaskCount({ minCapacity: 2, maxCapacity: 10 });
+    const frontendScaling = frontendService.autoScaleTaskCount({ minCapacity: 1, maxCapacity: 2 });
     frontendScaling.scaleOnCpuUtilization("FrontendCpuScaling", { targetUtilizationPercent: 50 });
 
     //バックエンドが作成されてから起動するよう依存関係を指定
