@@ -222,7 +222,7 @@ export class MyBlogCdkStack extends cdk.Stack {
           ec2.InstanceClass.BURSTABLE3,
           ec2.InstanceSize.MICRO
         ),
-        multiAz: true,
+        multiAz: false,
         allocatedStorage: 20,
         publiclyAccessible: false,
         vpcSubnets: {

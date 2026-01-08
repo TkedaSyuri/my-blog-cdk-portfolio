@@ -13,7 +13,7 @@ const { DB_ENDPOINT, SECRET_ID } = event;
       SecretString: JSON.stringify(secretObject),
     }).promise();
 
-    console.log("✅ Updated host to:", DB_ENDPOINT);
+    console.log("Updated host to:", DB_ENDPOINT);
   } catch (err) {
     console.error("Error updating secret:", err);
     throw err;
